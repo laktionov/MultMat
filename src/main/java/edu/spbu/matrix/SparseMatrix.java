@@ -6,6 +6,7 @@ import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Разряженная матрица
@@ -160,9 +161,116 @@ public class SparseMatrix implements Matrix
      * @param o
      * @return
      */
-    @Override public Matrix dmul(Matrix o)
-    {
-        return null;
+    @Override
+    public Matrix dmul(Matrix o){
+        SparseMatrix s = (SparseMatrix)o;
+
+        class Dispatcher {
+            int value = 0;
+            public int next() {
+                synchronized (this) {
+                    return value++;
+                }
+            }
+        }
+
+        Dispatcher dispatcher = new Dispatcher();
+
+
+        SparseMatrix sT = s.transpose();
+        ConcurrentHashMap<Integer, HashMap<Integer, Double>> cmap = new ConcurrentHashMap<>();
+        for (int i=0; i<row; i++) {
+            if (map.containsKey(i)) {
+                cmap.put(i, new HashMap<>(map.get(i)));
+            }
+        }
+
+        ConcurrentHashMap<Integer, HashMap<Integer, Double>> csT = new ConcurrentHashMap<>();
+        for (int i=0; i<sT.row; i++) {
+            if (sT.map.containsKey(i)) {
+                csT.put(i, sT.map.get(i));
+            }
+        }
+
+        HashMap<Integer, HashMap<Integer, Double>> result = new HashMap<>();
+        ConcurrentHashMap<Integer, HashMap<Integer, Double>> cresult = new ConcurrentHashMap<>();
+        double sum = 0;
+        class MultRow implements Runnable {
+            Thread thread;
+            HashMap<Integer, Double> tmp = new HashMap<>();
+
+            public MultRow(String s) {
+                thread = new Thread(this, s);
+                thread.start();
+            }
+            public void run() {
+                int i;
+                while ((i = dispatcher.next()) < row) {
+                    double sum = 0;
+                    if (map.containsKey(i)) {
+                        tmp = new HashMap<>();
+                        for (int j = 0; j < sT.row; j++) {
+                            if (csT.containsKey(j)) {
+                                for (int k = 0; k < sT.col; k++) {
+                                    if (csT.get(j).containsKey(k) && map.get(i).containsKey(k)) {
+                                        sum += csT.get(j).get(k) * map.get(i).get(k);
+                                    }
+                                }
+                                if (sum != 0) {
+                                    tmp.put(j, sum);
+                                }
+                                sum = 0;
+                            }
+                        }
+                        cresult.put(i, tmp);
+                    }
+                }
+            }
+        }
+
+        MultRow one = new MultRow("one");
+        MultRow two = new MultRow("two");
+        MultRow three = new MultRow("three");
+        MultRow four = new MultRow("four");
+
+        try {
+            one.thread.join();
+            two.thread.join();
+            three.thread.join();
+            four.thread.join();
+
+        } catch (InterruptedException e){
+            e.printStackTrace();
+        }
+
+/*        for (ConcurrentHashMap.Entry<Integer, HashMap<Integer, Double>> row1 : cmap.entrySet()){
+            for (ConcurrentHashMap.Entry<Integer, HashMap<Integer, Double>> row2 : csT.entrySet()) {
+                for (ConcurrentHashMap.Entry<Integer, Double> elem : row1.getValue().entrySet()) {
+                    if (row2.getValue().containsKey(elem.getKey())) {
+                        sum += elem.getValue()*row2.getValue().get(elem.getKey());
+                    }
+                }
+                if (sum != 0) {
+                    if (!result.containsKey(row1.getKey())) {
+                        cresult.put(row1.getKey(), new HashMap<>());
+                    }
+                    cresult.get(row1.getKey()).put(row2.getKey(), sum);
+                }
+                sum = 0;
+            }
+        }
+*/
+
+        HashMap<Integer, Double> tmp = new HashMap<>();
+        for (ConcurrentHashMap.Entry<Integer, HashMap<Integer, Double>> row1 : cresult.entrySet()){
+            tmp = new HashMap<>();
+            for (HashMap.Entry<Integer, Double> row2 : row1.getValue().entrySet()) {
+                tmp.put(row2.getKey(), row2.getValue());
+            }
+            result.put(row1.getKey(), tmp);
+        }
+
+        return new SparseMatrix(result, row, s.col);
     }
 
     /**
@@ -170,23 +278,30 @@ public class SparseMatrix implements Matrix
      * @param o
      * @return
      */
-    @Override public boolean equals(Object o) {
+    @Override
+    public boolean equals(Object o) {
         boolean y = true;
         if (o instanceof DenseMatrix) {
             DenseMatrix tmp = (DenseMatrix)o;
             if (tmp.data.length == row && tmp.data[0].length == col) {
-                for (int i = 0; i<tmp.data.length; i++) {
-                    for (int j=0; j<tmp.data[0].length; j++) {
-                        if (map.containsKey(i)) {
+                for (int i = 0; i<row; i++) {
+                    if (map.containsKey(i)) {
+                        for (int j = 0; j<col; j++) {
                             if (map.get(i).containsKey(j)) {
                                 if (map.get(i).get(j) != tmp.data[i][j]) {
                                     y = false;
                                 }
                             } else {
+                                if (tmp.data[i][j] != 0) {
+                                    y = false;
+                                }
+                            }
+                        }
+                    } else {
+                        for (int j = 0; j < col; j++) {
+                            if (tmp.data[i][j] != 0) {
                                 y = false;
                             }
-                        } else {
-                            y = false;
                         }
                     }
                 }
@@ -200,7 +315,7 @@ public class SparseMatrix implements Matrix
                     if (map.containsKey(i) && tmp.map.containsKey(i))  {
                         for (int j = 0; j<col; j++) {
                             if (map.get(i).containsKey(j) && tmp.map.get(i).containsKey(j)) {
-                                if (map.get(i).get(j) != tmp.map.get(i).get(j)) {
+                                if (map.get(i).get(j).doubleValue() != tmp.map.get(i).get(j).doubleValue()) {
                                     y = false;
                                 }
                             } else if (map.get(i).containsKey(j) || tmp.map.get(i).containsKey(j)) {
